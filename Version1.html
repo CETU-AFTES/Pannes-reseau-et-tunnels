@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Carte des pannes réseau et tunnels</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/15.7.1/nouislider.min.css" />
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    #slider-container {
+      position: absolute;
+      top: 100px;
+      left: 10px;
+      z-index: 1000;
+      background: white;
+      padding: 15px;
+      border-radius: 5px;
+      box-shadow: 0 0 5px rgba(0,0,0,0.3);
+      width: 300px;
+    }
+      .tunnel-shape {
+      width: 10px;
+      height: 7px;
+      background-color: #007bff; /* bleu tunnel */
+      border: 1px solid rgba(0, 0, 0, 0.4); /* bordure grise semi-transparente */
+      border-top-left-radius: 10px;
+      border-top-right-radius: 10px;
+      box-sizing: border-box;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); /* ombre douce pour relief */
+    }
+
+      #filter-checkbox {
+      margin-top: 10px;
+    }
+      #tunnel-chart {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      height: 150px;
+      margin-bottom: 10px;
+    }
+      .legend {
+      background-color: white;
+      padding: 8px;
+      border-radius: 4px;
+      box-shadow: 0 0 5px rgba(0, 0, 0, 0.3);
+      font-size: 14px;
+      border: 1px solid #ccc;
+      z-index: 1000;
+    }
+  </style>
+</head>
+<body>
+<div id="slider-container">
+  <canvas id="tunnel-chart"></canvas>
+  <div id="tunnel-count" style="margin-bottom: 10px;"><strong>Tunnels proches :</strong> 0</div>
+  <strong>Date :</strong> <span id="selected-date">2025-04-23</span>
+  <br><br>
+  <div id="date-slider"></div>
+  <br>
+  <label><input type="checkbox" id="filter-checkbox" checked=false> Afficher uniquement tunnels/pannes présent dans la distance de filtrage</label>
+<br><br>
+  <label for="radius-range">Distance de filtrage : <span id="radius-value">500</span> m</label>
+  <input type="range" id="radius-range" min="20" max="2000" value="500">
+</div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/noUiSlider/15.7.1/nouislider.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+
+const map = L.map('map').setView([46.8, 2.2], 6);
+L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap France',
+  maxZoom: 18
+}).addTo(map);
+
+const tunnelIcon = L.divIcon({
+  className: 'custom-tunnel-icon',
+  html: `<div class="tunnel-shape"></div>`,
+  iconSize: [20, 14],
+  iconAnchor: [10, 7]
+});
+
+const tunnelLayer = L.geoJSON(null, {
+  pointToLayer: (feature, latlng) => {
+    const marker = L.marker(latlng, { icon: tunnelIcon });
+    let content = '';
+    if (feature.properties) {
+      content = Object.entries(feature.properties).map(([key, val]) => `<strong>${key}</strong> : ${val}`).join('<br>');
+    }
+    marker.bindPopup(content);
+    return marker;
+  }
+});
+tunnelLayer.addTo(map);
+const panneLayer = L.geoJSON(null, {
+  pointToLayer: (feature, latlng) => L.circleMarker(latlng, { radius: 6, fillColor: 'red', color: 'darkred', weight: 1, fillOpacity: 0.8 })
+}).addTo(map);
+
+fetch("https://raw.githubusercontent.com/CETU-AFTES/Pannes-reseau-et-tunnels/refs/heads/main/Couche_tunnels.geojson")
+  .then(res => res.json())
+  .then(data => tunnelLayer.addData(data));
+
+const dates = [];
+const startDate = new Date("2025-04-23");
+const endDate = new Date("2025-05-13");
+for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+  dates.push(d.toISOString().slice(0, 10));
+}
+
+const slider = document.getElementById('date-slider');
+noUiSlider.create(slider, {
+  start: 0,
+  step: 1,
+  range: {
+    min: 0,
+    max: dates.length - 1
+  },
+  format: {
+    to: value => parseInt(value),
+    from: value => Number(value)
+  }
+});
+
+slider.noUiSlider.on('update', function (values) {
+  const index = parseInt(values[0]);
+  const date = dates[index];
+  document.getElementById('selected-date').innerText = date;
+  const url = `https://raw.githubusercontent.com/CETU-AFTES/Pannes-reseau-et-tunnels/refs/heads/main/${date}.geojson`;
+  fetch(url)
+    .then(res => res.json())
+    .then(data => {
+      panneLayer.clearLayers();
+      try {
+        panneLayer.addData(data);
+      } catch (e) {
+        console.warn('Certaines entités de pannes sont mal formatées et ont été ignorées.');
+        const featuresValides = (data.features || []).filter(f => {
+          try {
+            L.geoJSON(f);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        panneLayer.addData({ type: 'FeatureCollection', features: featuresValides });
+      }
+      if (filterActif) filtrerTunnelsEtPannes();
+    });
+});
+
+const checkbox = document.getElementById('filter-checkbox');
+let filterActif = checkbox.checked;
+
+function filtrerTunnelsEtPannes() {
+  const radius = parseInt(document.getElementById('radius-range').value);
+  const tunnels = [];
+  tunnelLayer.eachLayer(layer => {
+    if (layer.getLatLng) {
+      tunnels.push({ layer, latlng: layer.getLatLng() });
+    }
+  });
+  const pannes = [];
+  panneLayer.eachLayer(layer => {
+    if (layer.getLatLng) {
+      pannes.push({ layer, latlng: layer.getLatLng() });
+    }
+  });
+  // Masquer tout
+  tunnels.forEach(t => t.layer.setOpacity(0));
+  pannes.forEach(p => p.layer.setStyle({ opacity: 0, fillOpacity: 0 }));
+  // Réactiver si proche
+  let count = 0;
+  tunnels.forEach(t => {
+    const proche = pannes.some(p => t.latlng.distanceTo(p.latlng) <= radius);
+    if (proche) {
+    t.layer.setOpacity(1);
+    count++;
+  }
+  });
+  // Met à jour uniquement l'affichage, pas le tableau de données
+  document.getElementById('tunnel-count').innerHTML = `<strong>Tunnels proches :</strong> ${count}`;
+
+  pannes.forEach(p => {
+    const proche = tunnels.some(t => p.latlng.distanceTo(t.latlng) <= radius);
+    if (proche) p.layer.setStyle({ opacity: 1, fillOpacity: 0.8 });
+  });
+}
+
+const tunnelCounts = new Array(dates.length).fill(0);
+
+const chartCtx = document.getElementById('tunnel-chart').getContext('2d');
+const tunnelChart = new Chart(chartCtx, {
+  type: 'line',
+  data: {
+    labels: dates,
+    datasets: [{
+      label: 'Tunnels proches',
+      data: tunnelCounts,
+      fill: false,
+      borderColor: 'blue',
+      tension: 0.2
+    }]
+  },
+  options: {
+    onClick: function(evt, elements) {
+      if (elements.length > 0) {
+        const index = elements[0].index;
+        slider.noUiSlider.set(index);
+      }
+    },
+    plugins: {
+      legend: { display: false }
+    }
+  }
+});
+
+slider.noUiSlider.set(0); // charge la première date
+
+document.getElementById('filter-checkbox').addEventListener('change', e => {
+  filterActif = e.target.checked;
+  if (filterActif) filtrerTunnelsEtPannes();
+  else {
+  document.getElementById('tunnel-count').innerHTML = `<strong>Tunnels proches :</strong> ${tunnelLayer.getLayers().length}`;
+  // Ne met pas à jour le graphique dynamiquement ici pour éviter les doublons
+  // tunnelCounts[...] n'est modifié qu'au chargement initial
+  tunnelChart.update();
+  tunnelLayer.eachLayer(l => l.setOpacity(1));
+    panneLayer.eachLayer(l => l.setStyle({ opacity: 1, fillOpacity: 0.8 }));
+  }
+});
+</script>
+<script>
+async function prechargerComptageTunnels() {
+  const radius = parseInt(document.getElementById('radius-range').value);
+  const tunnelPoints = [];
+  tunnelLayer.eachLayer(layer => {
+    if (layer.getLatLng) tunnelPoints.push(layer.getLatLng());
+  });
+
+  for (let i = 0; i < dates.length; i++) {
+    const date = dates[i];
+    const url = `https://raw.githubusercontent.com/CETU-AFTES/Pannes-reseau-et-tunnels/refs/heads/main/${date}.geojson`;
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+      const pannes = [];
+      (data.features || []).forEach(f => {
+        try {
+          const layer = L.geoJSON(f).getLayers()[0];
+          if (layer.getLatLng) pannes.push(layer.getLatLng());
+        } catch {}
+      });
+      const tunnelsProches = new Set();
+      tunnelPoints.forEach((t, index) => {
+        if (pannes.some(p => t.distanceTo(p) <= radius)) {
+          tunnelsProches.add(index); // on ajoute l'index du tunnel une seule fois
+        }
+      });
+      tunnelCounts[i] = tunnelsProches.size;
+    } catch (e) {
+      console.warn(`Erreur chargement ${date}`, e);
+    }
+  }
+
+  tunnelChart.update();
+}
+
+// Appel seulement une fois que les tunnels sont chargés
+fetch("https://raw.githubusercontent.com/CETU-AFTES/Pannes-reseau-et-tunnels/refs/heads/main/Couche_tunnels.geojson")
+  .then(res => res.json())
+  .then(data => {
+    prechargerComptageTunnels();
+  });
+</script>
+<script>
+  const radiusSlider = document.getElementById('radius-range');
+  radiusSlider.addEventListener('input', e => {
+    document.getElementById('radius-value').innerText = e.target.value;
+  });
+
+  radiusSlider.addEventListener('change', e => {
+    document.getElementById('radius-value').innerText = e.target.value;
+    prechargerComptageTunnels();
+    if (filterActif) filtrerTunnelsEtPannes();
+  });
+</script>
+<script>
+const legend = L.control({ position: 'bottomright' });
+legend.onAdd = function (map) {
+  const div = L.DomUtil.create('div', 'legend');
+  div.innerHTML += `<div><div class='tunnel-shape' style='display:inline-block;margin-right:5px;'></div> Tunnel</div>`;
+  div.innerHTML += `<div><svg width='12' height='12'><circle cx='6' cy='6' r='5' fill='red' stroke='darkred' stroke-width='1'/></svg> Panne réseau</div>`;
+  return div;
+};
+legend.addTo(map);
+</script>
+
+</body>
+</html>
